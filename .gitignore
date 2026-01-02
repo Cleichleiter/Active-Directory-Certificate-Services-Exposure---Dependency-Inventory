@@ -1,17 +1,8 @@
-# Generated outputs
-# Runtime output
-reports/*.json
-reports/*.csv
-reports/*.log
-reports/*.txt
+# Runtime output (never commit generated data)
 reports/*
 !reports/.gitkeep
 
-
-# Keep the folder
-!reports/.gitkeep
-
-# Editor/OS noise
+# Editor / OS noise
 .vscode/
 *.log
 *.tmp
