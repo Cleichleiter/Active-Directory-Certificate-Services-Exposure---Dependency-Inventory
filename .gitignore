@@ -1,7 +1,12 @@
 # Generated outputs
+# Runtime output
 reports/*.json
 reports/*.csv
-reports/*.html
+reports/*.log
+reports/*.txt
+reports/*
+!reports/.gitkeep
+
 
 # Keep the folder
 !reports/.gitkeep
