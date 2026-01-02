@@ -1,0 +1,14 @@
+# Generated outputs
+reports/*.json
+reports/*.csv
+reports/*.html
+
+# Keep the folder
+!reports/.gitkeep
+
+# Editor/OS noise
+.vscode/
+*.log
+*.tmp
+Thumbs.db
+.DS_Store
