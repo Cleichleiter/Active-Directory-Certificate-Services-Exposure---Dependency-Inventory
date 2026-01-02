@@ -1,162 +1,88 @@
-Active Directory Certificate Services Exposure \& Dependency Inventory
+README.md text to add
 
+Execution Context and Requirements
 
 
-This project provides a read-only inventory and dependency analysis of Active Directory Certificate Services (AD CS) in enterprise environments.
 
+This toolkit supports two execution modes depending on where it is run.
 
 
-Its purpose is to help organizations understand where certificate-based trust exists, what depends on it, and what breaks if it fails—before attempting enforcement, migration, or security controls.
 
+Local-only mode (works on any Windows workstation)
 
 
-Most environments operate AD CS as critical infrastructure without a clear understanding of its trust boundaries or blast radius. This project exists to make those dependencies visible.
 
+Collects local certificate store inventory and local certificate usage signals
 
 
-What This Project Does
 
+Produces valid adcs\_inventory.json and adcs\_inventory.csv outputs
 
 
-Inventories AD CS infrastructure and certificate authorities
 
+Does not require domain membership or access to Active Directory
 
 
-Enumerates enabled certificate templates and their intended usage
 
+Directory-backed mode (requires domain access)
 
 
-Identifies certificate-based trust dependencies across services
 
+Enumerates AD CS Certificate Templates and Enterprise CAs from Active Directory
 
 
-Surfaces implicit and undocumented trust relationships
 
+Summarizes template permissions (Enroll/AutoEnroll and high-impact rights) when enabled
 
 
-Produces machine-readable and human-readable inventory outputs
 
+Requires:
 
 
-Supports risk, availability, and migration planning discussions
 
+A domain-joined host
 
 
-What This Project Does Not Do
 
+Network reachability to a domain controller
 
 
-Perform exploitation or privilege escalation
 
+Sufficient read access to the Configuration naming context and PKI containers
 
 
-Map ESC attack paths
 
+Graceful skip behavior
 
 
-Simulate adversary behavior
 
+When the script detects that directory-backed inventory is not available (for example, on a non-domain workstation), it will:
 
 
-Modify certificate services or templates
 
+Log an informational message
 
 
-Enforce cryptographic or identity controls
 
+Skip CA/template/permission modules safely
 
 
-This is not a red-team tool. It is an engineering and architecture visibility tool.
 
+Continue producing local-only inventory outputs without throwing exceptions
 
 
-Intended Use Cases
 
+Recommended run locations for full coverage
 
 
-Understanding certificate trust as a dependency, not just a security control
 
+Domain Controller (DC)
 
 
-Identifying single points of failure in identity infrastructure
 
+Certificate Authority (CA) server
 
 
-Preparing for certificate lifecycle changes or migrations
 
-
-
-Supporting audits, risk assessments, and documentation efforts
-
-
-
-Informing modernization or cryptographic transition planning
-
-
-
-Project Philosophy
-
-
-
-Certificate services create implicit trust.
-
-
-
-Implicit trust is often undocumented, widely relied upon, and poorly understood until it fails.
-
-This project treats AD CS as infrastructure, not as an attack surface.
-
-
-
-Inventory comes before enforcement.
-
-Understanding comes before controls.
-
-
-
-Project Status
-
-
-
-This project is active but intentionally scoped.
-
-
-
-The current goal is to establish a reliable baseline for AD CS exposure and dependency visibility. Future enhancements may be added incrementally based on real-world needs, with an emphasis on safety, correctness, and clarity over feature expansion.
-
-
-
-There is no fixed roadmap or release schedule.
-
-
-
-Audience
-
-
-
-Systems and identity engineers
-
-
-
-Infrastructure and enterprise architects
-
-
-
-Security and risk professionals
-
-
-
-Technical leaders responsible for availability and trust
-
-
-
-Familiarity with Active Directory concepts is assumed.
-
-
-
-License
-
-
-
-This project is licensed under the terms of the included LICENSE file.
+Domain-joined management host with RSAT and directory read access
 

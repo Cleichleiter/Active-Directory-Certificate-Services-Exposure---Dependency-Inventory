@@ -1,151 +1,193 @@
 function Get-ADCSCertificateTemplates {
     [CmdletBinding()]
     param(
+        [Parameter()]
         [string] $ConfigNC,
 
         [switch] $IncludeSecurityDescriptor
     )
 
-    $results = @()
+    Set-StrictMode -Version Latest
+    $ErrorActionPreference = 'Stop'
 
-    function Convert-FlagValue {
-        param([Nullable[int]]$Value, [hashtable]$Map)
-        if ($null -eq $Value) { return @() }
-        $set = @()
-        foreach ($k in $Map.Keys) {
-            if (($Value -band $k) -eq $k) { $set += $Map[$k] }
+    function Resolve-ConfigNC {
+        param([string]$InputConfigNC)
+
+        # If provided and non-empty, trust it as string DN
+        if ($InputConfigNC -and $InputConfigNC.Trim().Length -gt 0) {
+            return $InputConfigNC.Trim()
         }
-        return $set
+
+        # Prefer AD module when available
+        try {
+            if (Get-Module -ListAvailable -Name ActiveDirectory) {
+                Import-Module ActiveDirectory -ErrorAction Stop
+                $nc = (Get-ADRootDSE).configurationNamingContext
+                return ([string]$nc).Trim()
+            }
+        } catch { }
+
+        # Fallback to ADSI RootDSE
+        $root = [ADSI]"LDAP://RootDSE"
+
+        # In Windows PowerShell 5.1 this might be a PropertyValueCollection-ish object.
+        $raw = $root.Properties["configurationNamingContext"]
+
+        if ($raw -and $raw.Count -gt 0) {
+            return ([string]$raw[0]).Trim()
+        }
+
+        # Some environments expose it directly
+        try {
+            $direct = $root.configurationNamingContext
+            if ($direct) { return ([string]$direct).Trim() }
+        } catch { }
+
+        throw "Unable to resolve configurationNamingContext from RootDSE."
     }
 
-    # Minimal, defensible maps (not exhaustive; avoids misleading labels)
-    $enrollFlagMap = @{
-        0x00000001 = 'IncludeSymmetricAlgorithms'
-        0x00000002 = 'PublishToDS'
-        0x00000004 = 'AutoEnrollment'
-        0x00000010 = 'DoNotStoreCert'
-        0x00000020 = 'AllowKeyExport'
-        0x00000040 = 'ReuseKeys'
-        0x00000100 = 'RequireUserInteraction'
-        0x00000400 = 'RemoveInvalidCertFromStore'
+    $ConfigNC = Resolve-ConfigNC -InputConfigNC $ConfigNC
+
+    if (-not $ConfigNC -or $ConfigNC.Trim().Length -eq 0) {
+        throw "ConfigNC resolved to an empty value; cannot query AD CS template container."
     }
 
-    $nameFlagMap = @{
-        0x00000001 = 'EnrolleeSuppliesSubject'
-        0x00000002 = 'AddEmail'
-        0x00000004 = 'AddUPN'
-        0x00000008 = 'AddDNS'
-        0x00010000 = 'SubjectRequireCommonName'
-        0x00400000 = 'SubjectAltRequireUPN'
-        0x00800000 = 'SubjectAltRequireEmail'
-        0x02000000 = 'SubjectAltRequireDNS'
-        0x04000000 = 'SubjectAltRequireSPN'
-    }
+    $templatesDn = "CN=Certificate Templates,CN=Public Key Services,CN=Services,$ConfigNC"
+
+    # Create SearchRoot with explicit auth; this is more reliable than default bindings.
+    $searchRoot = New-Object System.DirectoryServices.DirectoryEntry("LDAP://$templatesDn")
+    $searchRoot.AuthenticationType = [System.DirectoryServices.AuthenticationTypes]::Secure
+
+    $ds = New-Object System.DirectoryServices.DirectorySearcher($searchRoot)
+    $ds.PageSize = 500
+    $ds.Filter = "(objectClass=pKICertificateTemplate)"
+    $ds.ReferralChasing = [System.DirectoryServices.ReferralChasingOption]::None
+
+    # Properties
+    @(
+        "cn",
+        "displayName",
+        "distinguishedName",
+        "msPKI-Template-Schema-Version",
+        "msPKI-Minimal-Key-Size",
+        "msPKI-Enrollment-Flag",
+        "msPKI-Private-Key-Flag",
+        "msPKI-Certificate-Name-Flag",
+        "pKIExtendedKeyUsage",
+        "pKIKeyUsage"
+    ) | ForEach-Object { [void]$ds.PropertiesToLoad.Add($_) }
 
     try {
-        $useADModule = [bool](Get-Module -ListAvailable -Name ActiveDirectory)
-
-        if (-not $ConfigNC) {
-            if ($useADModule) {
-                Import-Module ActiveDirectory -ErrorAction Stop
-                $root = Get-ADRootDSE
-                $ConfigNC = $root.configurationNamingContext
-            } else {
-                $root = [ADSI]"LDAP://RootDSE"
-                $ConfigNC = $root.configurationNamingContext.Value
-            }
-        }
-
-        $templatesDn = "CN=Certificate Templates,CN=Public Key Services,CN=Services,$ConfigNC"
-
-        if ($useADModule) {
-            Import-Module ActiveDirectory -ErrorAction Stop
-
-            $props = @(
-                'cn','displayName','distinguishedName','msPKI-Template-Schema-Version',
-                'msPKI-Template-Minor-Revision','msPKI-Certificate-Name-Flag',
-                'msPKI-Enrollment-Flag','msPKI-Private-Key-Flag','msPKI-Minimal-Key-Size',
-                'pKIExtendedKeyUsage','pKIKeyUsage','pKIDefaultKeySpec','whenCreated','whenChanged',
-                'nTSecurityDescriptor'
-            )
-
-            $templates = Get-ADObject -LDAPFilter "(objectClass=pKICertificateTemplate)" -SearchBase $templatesDn -Properties $props
-
-            foreach ($t in $templates) {
-                $eku = @($t.pKIExtendedKeyUsage) | Where-Object { $_ } | ForEach-Object { $_.ToString() }
-                $minKey = $t.'msPKI-Minimal-Key-Size'
-
-                $enrollFlags = Convert-FlagValue -Value ([int]$t.'msPKI-Enrollment-Flag') -Map $enrollFlagMap
-                $nameFlags   = Convert-FlagValue -Value ([int]$t.'msPKI-Certificate-Name-Flag') -Map $nameFlagMap
-
-                $obj = [ordered]@{
-                    type              = 'Template'
-                    name              = $t.cn
-                    displayName       = $t.displayName
-                    distinguishedName = $t.DistinguishedName
-                    schemaVersion     = $t.'msPKI-Template-Schema-Version'
-                    minorRevision     = $t.'msPKI-Template-Minor-Revision'
-                    minimalKeySize    = $minKey
-                    defaultKeySpec    = $t.pKIDefaultKeySpec
-                    ekuOids           = $eku
-                    enrollmentFlags   = $enrollFlags
-                    nameFlags         = $nameFlags
-                    whenCreated       = $t.whenCreated
-                    whenChanged       = $t.whenChanged
-                }
-
-                if ($IncludeSecurityDescriptor) {
-                    try { $obj.securityDescriptorSddl = $t.nTSecurityDescriptor.Sddl } catch { $obj.securityDescriptorSddl = $null }
-                }
-
-                $results += [pscustomobject]$obj
-            }
-        }
-        else {
-            # ADSI fallback
-            $searcher = New-Object System.DirectoryServices.DirectorySearcher
-            $searcher.SearchRoot = New-Object System.DirectoryServices.DirectoryEntry("LDAP://$templatesDn")
-            $searcher.Filter = "(objectClass=pKICertificateTemplate)"
-            $searcher.PageSize = 1000
-
-            $props = @(
-                'cn','displayName','distinguishedName','msPKI-Template-Schema-Version','msPKI-Template-Minor-Revision',
-                'msPKI-Certificate-Name-Flag','msPKI-Enrollment-Flag','msPKI-Minimal-Key-Size',
-                'pKIExtendedKeyUsage','pKIDefaultKeySpec','whenCreated','whenChanged'
-            )
-            $searcher.PropertiesToLoad.AddRange($props) | Out-Null
-            if ($IncludeSecurityDescriptor) { $searcher.PropertiesToLoad.Add('nTSecurityDescriptor') | Out-Null }
-
-            $found = $searcher.FindAll()
-            foreach ($r in $found) {
-                $p = $r.Properties
-
-                $enrollFlags = Convert-FlagValue -Value ([int]($p.'mspki-enrollment-flag' | Select-Object -First 1)) -Map $enrollFlagMap
-                $nameFlags   = Convert-FlagValue -Value ([int]($p.'mspki-certificate-name-flag' | Select-Object -First 1)) -Map $nameFlagMap
-
-                $obj = [ordered]@{
-                    type              = 'Template'
-                    name              = ($p.cn | Select-Object -First 1)
-                    displayName       = ($p.displayname | Select-Object -First 1)
-                    distinguishedName = ($p.distinguishedname | Select-Object -First 1)
-                    schemaVersion     = ($p.'mspki-template-schema-version' | Select-Object -First 1)
-                    minorRevision     = ($p.'mspki-template-minor-revision' | Select-Object -First 1)
-                    minimalKeySize    = ($p.'mspki-minimal-key-size' | Select-Object -First 1)
-                    defaultKeySpec    = ($p.'pkidefaultkeyspec' | Select-Object -First 1)
-                    ekuOids           = @($p.'pkiextendedkeyusage')
-                    enrollmentFlags   = $enrollFlags
-                    nameFlags         = $nameFlags
-                    whenCreated       = ($p.whencreated | Select-Object -First 1)
-                    whenChanged       = ($p.whenchanged | Select-Object -First 1)
-                }
-
-                $results += [pscustomobject]$obj
-            }
-        }
+        $results = $ds.FindAll()
     }
     catch {
-        Write-Verbose "Get-ADCSCertificateTemplates failed: $($_.Exception.Message)"
+        # Provide actionable diagnostics
+        $msg = $_.Exception.Message
+        throw "Directory search failed against '$templatesDn'. Error: $msg"
     }
 
-    return $results
+    $out = New-Object System.Collections.Generic.List[object]
+
+    foreach ($r in $results) {
+        $p = $r.Properties
+
+        $name = $null
+        if ($p["cn"] -and $p["cn"].Count -gt 0) { $name = [string]$p["cn"][0] }
+
+        $dn = $null
+        if ($p["distinguishedname"] -and $p["distinguishedname"].Count -gt 0) { $dn = [string]$p["distinguishedname"][0] }
+
+        $displayName = $null
+        if ($p["displayname"] -and $p["displayname"].Count -gt 0) { $displayName = [string]$p["displayname"][0] }
+
+        $schemaVersion = $null
+        if ($p["mspki-template-schema-version"] -and $p["mspki-template-schema-version"].Count -gt 0) {
+            $schemaVersion = [int]$p["mspki-template-schema-version"][0]
+        }
+
+        $minimalKeySize = $null
+        if ($p["mspki-minimal-key-size"] -and $p["mspki-minimal-key-size"].Count -gt 0) {
+            $minimalKeySize = [int]$p["mspki-minimal-key-size"][0]
+        }
+
+        $enrollmentFlags = $null
+        if ($p["mspki-enrollment-flag"] -and $p["mspki-enrollment-flag"].Count -gt 0) {
+            $enrollmentFlags = [int]$p["mspki-enrollment-flag"][0]
+        }
+
+        $privateKeyFlags = $null
+        if ($p["mspki-private-key-flag"] -and $p["mspki-private-key-flag"].Count -gt 0) {
+            $privateKeyFlags = [int]$p["mspki-private-key-flag"][0]
+        }
+
+        $nameFlags = $null
+        if ($p["mspki-certificate-name-flag"] -and $p["mspki-certificate-name-flag"].Count -gt 0) {
+            $nameFlags = [int]$p["mspki-certificate-name-flag"][0]
+        }
+
+        $ekus = @()
+        if ($p["pkiextendedkeyusage"] -and $p["pkiextendedkeyusage"].Count -gt 0) {
+            $ekus = @($p["pkiextendedkeyusage"] | ForEach-Object { [string]$_ })
+        }
+
+        $keyUsage = $null
+        if ($p["pkikeyusage"] -and $p["pkikeyusage"].Count -gt 0) {
+            $keyUsage = $p["pkikeyusage"][0]
+        }
+
+        # Minimal decoded signals
+        $enrollmentFlagNames = New-Object System.Collections.Generic.List[string]
+        if ($null -ne $enrollmentFlags) {
+            if (($enrollmentFlags -band 0x00000010) -ne 0) { $enrollmentFlagNames.Add("AutoEnrollment") }
+        }
+
+        $privateKeyFlagNames = New-Object System.Collections.Generic.List[string]
+        if ($null -ne $privateKeyFlags) {
+            if (($privateKeyFlags -band 0x00000001) -ne 0) { $privateKeyFlagNames.Add("RequireKeyArchival") }
+            if (($privateKeyFlags -band 0x00000010) -ne 0) { $privateKeyFlagNames.Add("AllowKeyExport") }
+        }
+
+        $nameFlagNames = New-Object System.Collections.Generic.List[string]
+        if ($null -ne $nameFlags) {
+            if (($nameFlags -band 0x00000001) -ne 0) { $nameFlagNames.Add("EnrolleeSuppliesSubject") }
+        }
+
+        $sddl = $null
+        $sddlError = $null
+
+        if ($IncludeSecurityDescriptor -and $dn) {
+            try {
+                $de = New-Object System.DirectoryServices.DirectoryEntry("LDAP://$dn")
+                $de.AuthenticationType = [System.DirectoryServices.AuthenticationTypes]::Secure
+
+                $sddl = $de.ObjectSecurity.GetSecurityDescriptorSddlForm(
+                    [System.Security.AccessControl.AccessControlSections]::All
+                )
+            }
+            catch {
+                $sddlError = $_.Exception.Message
+                $sddl = $null
+            }
+        }
+
+        $out.Add([pscustomobject]@{
+            name                          = $name
+            displayName                   = $displayName
+            distinguishedName             = $dn
+            schemaVersion                 = $schemaVersion
+            minimalKeySize                = $minimalKeySize
+            enrollmentFlagsRaw            = $enrollmentFlags
+            privateKeyFlagsRaw            = $privateKeyFlags
+            nameFlagsRaw                  = $nameFlags
+            enrollmentFlags               = @($enrollmentFlagNames)
+            privateKeyFlags               = @($privateKeyFlagNames)
+            nameFlags                     = @($nameFlagNames)
+            extendedKeyUsageOids          = @($ekus)
+            keyUsageRaw                   = $keyUsage
+            securityDescriptorSddl        = $sddl
+            securityDescriptorReadError   = $sddlError
+        })
+    }
+
+    return $out
 }
